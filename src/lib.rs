@@ -76,15 +76,61 @@ pub fn run_visualizer() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+struct RunningStatistics {
+    pub num: u64,
+    pub old_m: f64,
+    pub new_m: f64,
+    pub old_s: f64,
+    pub new_s: f64,
+}
+
+impl RunningStatistics {
+    pub fn new() -> RunningStatistics {
+        RunningStatistics { num: 0, old_m: 0.0, new_m: 0.0, old_s: 0.0, new_s: 0.0 }
+    }
+
+    pub fn add_sample(&mut self, sample: f64) {
+        self.num += 1;
+
+        if self.num == 1 {
+            self.old_m = sample;
+            self.new_m = sample;
+            self.old_s = 0.0;
+        }
+        else {
+            self.new_m = self.old_m + ((sample - self.old_m) / self.num as f64);
+            self.new_s = self.old_s + ((sample - self.old_m) * (sample - self.new_m));
+
+            self.old_m = self.new_m;
+            self.old_s = self.new_s;
+        }
+    }
+
+    pub fn mean(&self) -> f64 {
+        if self.num > 0 {
+            return self.new_m
+        }
+        0.0
+    }
+
+    pub fn variance(&self) -> f64 {
+        if self.num > 1 {
+            return self.new_s / ((self.num - 1) as f64)
+        }
+        0.0
+    }
+}
+
 struct SampleSet {
     pub samples : Vec<f64>,
     pub value_min : f64,
     pub value_max : f64,
+    pub statistics : RunningStatistics,
 }
 
 impl SampleSet {
     pub fn new() -> SampleSet {
-        SampleSet { samples: Default::default(), value_min: 0.0, value_max: 0.0 }
+        SampleSet { samples: Default::default(), value_min: 0.0, value_max: 0.0, statistics: RunningStatistics::new() }
     }
 
     pub fn add_sample(&mut self, sample: f64) {
@@ -100,10 +146,25 @@ impl SampleSet {
         }
 
         self.samples.push(sample);
+
+        self.statistics.add_sample(sample);
     }
 
     pub fn get_mean(&self) -> f64 {
-        self.samples.iter().sum::<f64>() / self.samples.len() as f64
+        self.statistics.mean()
+    }
+
+    fn get_half_range(&self) -> f64 {
+        //self.statistics.variance() * 4.0
+        f64::sqrt(self.statistics.variance()) * 2.0
+    }
+
+    pub fn get_range_start(&self) -> f64 {
+        self.statistics.mean() - self.get_half_range()
+    }
+
+    pub fn get_range_end(&self) -> f64 {
+        self.statistics.mean() + self.get_half_range()
     }
 }
 
@@ -125,10 +186,19 @@ impl ValueSet {
 }
 
 struct DataSet {
+    pub base_name : String,
+    pub archive: bool,
+    pub compress: bool,
+    pub ordered: bool,
+    pub uniform: bool,
     pub sorted_values : Vec<ValueSet>,
 }
 
 impl DataSet {
+    pub fn new(base_name: String, archive: bool, compress: bool, ordered: bool, uniform: bool) -> DataSet {
+        DataSet { base_name: base_name, archive: archive, compress: compress, ordered: ordered, uniform: uniform, sorted_values: Default::default() }
+    }
+
     pub fn add_sample(&mut self, commits: u64, commit_time: f64, query_time: f64) {
         match self.sorted_values.binary_search_by(|probe| probe.num_commits.cmp(&commits)) {
             Ok(val) => self.sorted_values[val].add_sample(commit_time, query_time),
@@ -138,6 +208,23 @@ impl DataSet {
                 self.sorted_values.insert(val, valueset);
             },
         }
+    }
+
+    pub fn _get_full_name(&self) -> String {
+        DataSet::get_name(self.base_name.clone(), self.archive, self.compress, self.ordered, self.uniform)
+    }
+
+    pub fn get_name(base_name: String, archive: bool, compress: bool, ordered: bool, uniform: bool) -> String {
+        let mut suffix = String::new();
+        if archive { suffix += "archive"; }
+        if compress { if suffix.len() > 0 { suffix += " "; } suffix += "compress"; }
+        if ordered { if suffix.len() > 0 { suffix += " "; } suffix += "ordered"; }
+        if uniform { if suffix.len() > 0 { suffix += " "; } suffix += "uniform"; }
+        if suffix.len() > 0 {
+            suffix = " (".to_string() + &suffix + ")";
+        }
+
+        base_name.clone() + &suffix
     }
 }
 
@@ -155,19 +242,21 @@ impl StressTestData {
         StressTestData { datasets: Default::default(), max_commits: 0, max_commit_time: 0.0f64, max_query_time: 0.0f64, max_commits_per_second: 0.0f64, max_queries_per_second: 0.0f64 }
     }
 
-    pub fn add_sample(&mut self, name: String, commits: u64, commit_time: f64, query_time: f64) {
+    pub fn add_sample(&mut self, base_name: String, archive: bool, compress: bool, ordered: bool, uniform: bool, commits: u64, commit_time: f64, query_time: f64) {
         self.max_commits = std::cmp::max(self.max_commits, commits);
         self.max_commit_time = self.max_commit_time.max(commit_time);
         self.max_query_time = self.max_query_time.max(query_time);
         self.max_commits_per_second = self.max_commits_per_second.max(commits as f64 / commit_time);
         self.max_queries_per_second = self.max_queries_per_second.max((commits * COMMIT_SIZE as u64) as f64 / query_time);
 
-        match self.datasets.entry(name) {
+        let full_name = DataSet::get_name(base_name.clone(), archive, compress, ordered, uniform);
+
+        match self.datasets.entry(full_name) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 entry.get_mut().add_sample(commits, commit_time, query_time);
             },
             std::collections::hash_map::Entry::Vacant(entry) => {
-                let mut dataset = DataSet { sorted_values: Default::default() };
+                let mut dataset = DataSet::new(base_name, archive, compress, ordered, uniform);
                 dataset.add_sample(commits, commit_time, query_time);
                 entry.insert(dataset);
             },
@@ -192,10 +281,20 @@ fn get_stress_test_data(args: &Args) -> Option<StressTestData> {
         // First line is column names, so skip.
         for line in reader.lines().skip(1).map(|l| l.unwrap()) {
             let elements = line.split(',').collect::<Vec<_>>();
-            let pruning: bool = elements[2].parse().unwrap();
-            let mut name = elements[0].to_string();
-            if pruning { name = name + " (Pruning)"; }
-            data.add_sample(name, elements[1].parse().unwrap(), elements[3].parse().unwrap(), elements[4].parse().unwrap());
+
+            let base_name = elements[0].to_string();
+
+            let commits = elements[1].parse().unwrap();
+
+            let archive: bool = elements[2].parse().unwrap();
+            let compress: bool = elements[3].parse().unwrap();
+            let ordered: bool = elements[4].parse().unwrap();
+            let uniform: bool = elements[5].parse().unwrap();
+
+            let commit_time = elements[6].parse().unwrap();
+            let query_time = elements[7].parse().unwrap();
+
+            data.add_sample(base_name, archive, compress, ordered, uniform, commits, commit_time, query_time);
         }
     }
 
@@ -222,8 +321,19 @@ fn draw_stress_test_data<DB: DrawingBackend>(b: &DrawingArea<DB, plotters::coord
     let mut datasets = Vec::new();
     let mut colour_index = 0;
     for entry in datasets_presort {
-        datasets.push((entry.0, entry.1, colours[colour_index].clone().stroke_width(params.stroke_width as u32), colours[colour_index].clone().stroke_width(params.stroke_width as u32 * 2)));
+        datasets.push((entry.0, entry.1, colours[colour_index].clone().stroke_width(params.stroke_width as u32), colours[colour_index].clone().stroke_width(params.stroke_width as u32 * 2), colours[colour_index].mix(0.75)));
         colour_index = (colour_index + 1) % colours.len();
+    }
+
+    let mut archive_changed = false;
+    let mut compress_changed = false;
+    let mut ordered_changed = false;
+    let mut uniform_changed = false;
+    for entry in datasets.iter().skip(1) {
+        if entry.1.archive != datasets[0].1.archive { archive_changed = true; }
+        if entry.1.compress != datasets[0].1.compress { compress_changed = true; }
+        if entry.1.ordered != datasets[0].1.ordered { ordered_changed = true; }
+        if entry.1.uniform != datasets[0].1.uniform { uniform_changed = true; }
     }
 
     {
@@ -301,24 +411,33 @@ fn draw_stress_test_data<DB: DrawingBackend>(b: &DrawingArea<DB, plotters::coord
 
             for entry in &datasets {
                 let mut points: Vec<(f64, f64)> = Default::default();
+                let mut points_neg: Vec<(f64, f64)> = Default::default();
+                let mut points_pos: Vec<(f64, f64)> = Default::default();
                 let mut errorbars: Vec<(f64, f64, f64, f64)> = Default::default();
                 for value in &entry.1.sorted_values {
                     let x = value.num_commits as f64;
 
                     let value_data = match chart_type {
-                        ChartType::CommitTime => (x, value.commit_time.value_min, value.commit_time.get_mean(), value.commit_time.value_max),
-                        ChartType::QueryTime => (x, value.query_time.value_min, value.query_time.get_mean(), value.query_time.value_max),
-                        ChartType::CommitsPerSecond => (x, x / value.commit_time.value_max, x / value.commit_time.get_mean(), x / value.commit_time.value_min),
-                        ChartType::QueriesPerSecond => (x, (x * COMMIT_SIZE as f64) / value.query_time.value_max, (x * COMMIT_SIZE as f64) / value.query_time.get_mean(), (x * COMMIT_SIZE as f64) / value.query_time.value_min),
+                        ChartType::CommitTime => (x, value.commit_time.value_min, value.commit_time.get_range_start(), value.commit_time.get_mean(), value.commit_time.get_range_end(), value.commit_time.value_max),
+                        ChartType::QueryTime => (x, value.query_time.value_min, value.query_time.get_range_start(), value.query_time.get_mean(), value.query_time.get_range_end(), value.query_time.value_max),
+                        ChartType::CommitsPerSecond => (x, x / value.commit_time.value_max, x / value.commit_time.get_range_end(), x / value.commit_time.get_mean(), x /  value.commit_time.get_range_start(), x / value.commit_time.value_min),
+                        ChartType::QueriesPerSecond => (x, (x * COMMIT_SIZE as f64) / value.query_time.value_max, (x * COMMIT_SIZE as f64) / value.query_time.get_range_end(), (x * COMMIT_SIZE as f64) / value.query_time.get_mean(), (x * COMMIT_SIZE as f64) / value.query_time.get_range_start(), (x * COMMIT_SIZE as f64) / value.query_time.value_min),
                     };
 
-                    points.push((value_data.0, value_data.2));
-                    errorbars.push(value_data);
+                    points.push((value_data.0, value_data.3));
+                    points_neg.push((value_data.0, value_data.2));
+                    points_pos.push((value_data.0, value_data.4));
+                    errorbars.push((value_data.0, value_data.1, value_data.3, value_data.5));
                 }
 
+                let display_name = DataSet::get_name(entry.1.base_name.clone(), entry.1.archive && archive_changed, entry.1.compress && compress_changed, entry.1.ordered && ordered_changed, entry.1.uniform && uniform_changed);
+
                 cc.draw_series(LineSeries::new(points, entry.3))?
-                    .label(entry.0)
+                    .label(display_name)
                     .legend(|(x, y)| PathElement::new(vec![(x, y), (x + (pixel_height * 0.03) as i32, y)], entry.3));
+
+                //cc.draw_series(LineSeries::new(points_neg, entry.4))?;
+                //cc.draw_series(LineSeries::new(points_pos, entry.4))?;
 
                 cc.draw_series(errorbars.iter().map(|(x, min, mean, _)| {
                     EmptyElement::at((*x, *min))
