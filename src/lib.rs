@@ -2,12 +2,9 @@ use clap::Parser;
 use plotters::{prelude::*};
 use std::{error::Error, io::BufRead, collections::HashMap, collections::HashSet, collections::BTreeSet, path::PathBuf, fmt::Debug};
 
-const COMMIT_SIZE: usize = 100;
-
 #[derive(Debug, Clone, clap::ValueEnum)]
 pub enum ChartType {
     CommitTime,
-    QueryTime,
     CommitsPerSecond,
     QueriesPerSecond,
 }
@@ -16,7 +13,6 @@ impl ChartType {
     pub fn get_from_string(text: &String) -> Option<ChartType> {
         match text.as_str() {
             "commit-time" => Some(ChartType::CommitTime),
-            "query-time" => Some(ChartType::QueryTime),
             "commits-per-second" => Some(ChartType::CommitsPerSecond),
             "queries-per-second" => Some(ChartType::QueriesPerSecond),
             _ => None,
@@ -231,17 +227,19 @@ impl SampleSet {
 struct ValueSet {
     pub num_commits : u64,
     pub commit_time : SampleSet,
-    pub query_time : SampleSet,
+    pub commits_per_second : SampleSet,
+    pub queries_per_second : SampleSet,
 }
 
 impl ValueSet {
     pub fn new(num_commits: u64) -> ValueSet {
-        ValueSet { num_commits: num_commits, commit_time: SampleSet::new(), query_time: SampleSet::new() }
+        ValueSet { num_commits: num_commits, commit_time: SampleSet::new(), commits_per_second: SampleSet::new(), queries_per_second: SampleSet::new() }
     }
 
-    pub fn add_sample(&mut self, commit_time: f64, query_time: f64) {
+    pub fn add_sample(&mut self, commit_time: f64, commits_per_second: f64, queries_per_second: f64) {
         self.commit_time.add_sample(commit_time);
-        self.query_time.add_sample(query_time);
+        self.commits_per_second.add_sample(commits_per_second);
+        self.queries_per_second.add_sample(queries_per_second);
     }
 }
 
@@ -253,7 +251,6 @@ struct DataSet {
 
     pub max_commits: u64,
     pub max_commit_time: f64,
-    pub max_query_time: f64,
     pub max_commits_per_second: f64,
     pub max_queries_per_second: f64,
 }
@@ -264,21 +261,20 @@ impl DataSet {
             base_name: base_name,
             set_bool_parameters: set_bool_parameters,
             sorted_values: Default::default(), 
-            max_commits: 0, max_commit_time: 0.0f64, max_query_time: 0.0f64, max_commits_per_second: 0.0f64, max_queries_per_second: 0.0f64 }
+            max_commits: 0, max_commit_time: 0.0f64, max_commits_per_second: 0.0f64, max_queries_per_second: 0.0f64 }
     }
 
-    pub fn add_sample(&mut self, commits: u64, commit_time: f64, query_time: f64) {
+    pub fn add_sample(&mut self, commits: u64, commit_time: f64, commits_per_second: f64, queries_per_second: f64) {
         self.max_commits = std::cmp::max(self.max_commits, commits);
         self.max_commit_time = self.max_commit_time.max(commit_time);
-        self.max_query_time = self.max_query_time.max(query_time);
-        self.max_commits_per_second = self.max_commits_per_second.max(commits as f64 / commit_time);
-        self.max_queries_per_second = self.max_queries_per_second.max((commits * COMMIT_SIZE as u64) as f64 / query_time);
+        self.max_commits_per_second = self.max_commits_per_second.max(commits_per_second);
+        self.max_queries_per_second = self.max_queries_per_second.max(queries_per_second);
 
         match self.sorted_values.binary_search_by(|probe| probe.num_commits.cmp(&commits)) {
-            Ok(val) => self.sorted_values[val].add_sample(commit_time, query_time),
+            Ok(val) => self.sorted_values[val].add_sample(commit_time, commits_per_second, queries_per_second),
             Err(val) => {
                 let mut valueset = ValueSet::new(commits);
-                valueset.add_sample(commit_time, query_time);
+                valueset.add_sample(commit_time, commits_per_second, queries_per_second);
                 self.sorted_values.insert(val, valueset);
             },
         }
@@ -347,32 +343,30 @@ struct StressTestData {
 
     pub max_commits: u64,
     pub max_commit_time: f64,
-    pub max_query_time: f64,
     pub max_commits_per_second: f64,
     pub max_queries_per_second: f64,
 }
 
 impl StressTestData {
     pub fn new() -> StressTestData {
-        StressTestData { datasets: Default::default(), max_commits: 0, max_commit_time: 0.0f64, max_query_time: 0.0f64, max_commits_per_second: 0.0f64, max_queries_per_second: 0.0f64 }
+        StressTestData { datasets: Default::default(), max_commits: 0, max_commit_time: 0.0f64, max_commits_per_second: 0.0f64, max_queries_per_second: 0.0f64 }
     }
 
-    pub fn add_sample(&mut self, base_name: String, set_bool_parameters: BTreeSet<String>, commits: u64, commit_time: f64, query_time: f64) {
+    pub fn add_sample(&mut self, base_name: String, set_bool_parameters: BTreeSet<String>, commits: u64, commit_time: f64, commits_per_second: f64, queries_per_second: f64) {
         self.max_commits = std::cmp::max(self.max_commits, commits);
         self.max_commit_time = self.max_commit_time.max(commit_time);
-        self.max_query_time = self.max_query_time.max(query_time);
-        self.max_commits_per_second = self.max_commits_per_second.max(commits as f64 / commit_time);
-        self.max_queries_per_second = self.max_queries_per_second.max((commits * COMMIT_SIZE as u64) as f64 / query_time);
+        self.max_commits_per_second = self.max_commits_per_second.max(commits_per_second);
+        self.max_queries_per_second = self.max_queries_per_second.max(queries_per_second);
 
         let full_name = DataSet::get_name(base_name.clone(), &set_bool_parameters);
 
         match self.datasets.entry(full_name) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
-                entry.get_mut().add_sample(commits, commit_time, query_time);
+                entry.get_mut().add_sample(commits, commit_time, commits_per_second, queries_per_second);
             },
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let mut dataset = DataSet::new(base_name, set_bool_parameters);
-                dataset.add_sample(commits, commit_time, query_time);
+                dataset.add_sample(commits, commit_time, commits_per_second, queries_per_second);
                 entry.insert(dataset);
             },
         }
@@ -395,27 +389,42 @@ fn get_stress_test_data(args: &Args) -> Option<StressTestData> {
 
         // First line is column names, so skip.
         for line in reader.lines().skip(1).map(|l| l.unwrap()) {
-            let elements = line.split(',').collect::<Vec<_>>();
+            let mut elements = line.split(',');
 
-            let base_name = elements[0].to_string();
+            let base_name = elements.next().unwrap().to_string();
 
-            let commits = elements[1].parse().unwrap();
+            let archive: bool = elements.next().unwrap().parse().unwrap();
+            let compress: bool = elements.next().unwrap().parse().unwrap();
+            let ordered: bool = elements.next().unwrap().parse().unwrap();
+            let uniform: bool = elements.next().unwrap().parse().unwrap();
+            let num_readers: u64 = elements.next().unwrap().parse().unwrap();
+            let _num_writers: u64 = elements.next().unwrap().parse().unwrap();
+            let _writer_commits_per_sleep: u64 = elements.next().unwrap().parse().unwrap();
+            let _writer_sleep_time: u64 = elements.next().unwrap().parse().unwrap();
+            let _commits_per_timing_sample: u64 = elements.next().unwrap().parse().unwrap();
+            let progressive: bool = elements.next().unwrap().parse().unwrap();
 
-            let archive: bool = elements[2].parse().unwrap();
-            let compress: bool = elements[3].parse().unwrap();
-            let ordered: bool = elements[4].parse().unwrap();
-            let uniform: bool = elements[5].parse().unwrap();
+            let total_commits = elements.next().unwrap().parse().unwrap();
+            let total_commit_time = elements.next().unwrap().parse().unwrap();
 
-            let commit_time = elements[6].parse().unwrap();
-            let query_time = elements[7].parse().unwrap();
+            let commits: u64 = elements.next().unwrap().parse().unwrap();
+            let commit_time: f64 = elements.next().unwrap().parse().unwrap();
+
+            let queries: u64 = elements.next().unwrap().parse().unwrap();
+            let query_time: f64 = elements.next().unwrap().parse().unwrap();
+
+            let commits_per_second = commits as f64 / commit_time;
+            let queries_per_second = queries as f64 / query_time;
 
             let mut set_bool_parameters: BTreeSet<String> = Default::default();
             if archive { set_bool_parameters.insert("archive".to_string()); }
             if compress { set_bool_parameters.insert("compress".to_string()); }
             if ordered { set_bool_parameters.insert("ordered".to_string()); }
             if uniform { set_bool_parameters.insert("uniform".to_string()); }
+            if progressive { set_bool_parameters.insert("progressive".to_string()); }
+            if num_readers > 0 { set_bool_parameters.insert("readers".to_string()); }
     
-            data.add_sample(base_name, set_bool_parameters, commits, commit_time, query_time);
+            data.add_sample(base_name, set_bool_parameters, total_commits, total_commit_time, commits_per_second, queries_per_second);
         }
     }
 
@@ -430,7 +439,10 @@ fn draw_stress_test_data<DB: DrawingBackend>(b: &DrawingArea<DB, plotters::coord
     colours.push(full_palette::YELLOW);
     colours.push(full_palette::RED);
     colours.push(full_palette::BLACK);
+    colours.push(full_palette::BROWN_400);
+    colours.push(full_palette::PINK);
     colours.push(full_palette::ORANGE);
+    colours.push(full_palette::GREY);
 
     let mut datasets_presort = Vec::new();
     for entry in &data.datasets {
@@ -478,7 +490,6 @@ fn draw_stress_test_data<DB: DrawingBackend>(b: &DrawingArea<DB, plotters::coord
 
             let mut title = match chart_type {
                 ChartType::CommitTime => "Commit Time",
-                ChartType::QueryTime => "Query Time",
                 ChartType::CommitsPerSecond => "Commits per Second",
                 ChartType::QueriesPerSecond => "Queries per Second",
             }.to_string();
@@ -507,12 +518,13 @@ fn draw_stress_test_data<DB: DrawingBackend>(b: &DrawingArea<DB, plotters::coord
             let mut compress_changed = false;
             let mut ordered_changed = false;
             let mut uniform_changed = false; 
+            let mut readers_changed = false; 
+            let mut progressive_changed = false;
             for entry in &datasets {
                 let passed_filters = entry.1.passed_filters(&params.chart_specs[i].chart_bool_parameters);
                 if passed_filters {
                     let dataset_max_y = match chart_type {
                         ChartType::CommitTime => entry.1.max_commit_time,
-                        ChartType::QueryTime => entry.1.max_query_time,
                         ChartType::CommitsPerSecond => entry.1.max_commits_per_second,
                         ChartType::QueriesPerSecond => entry.1.max_queries_per_second,
                     };
@@ -524,6 +536,8 @@ fn draw_stress_test_data<DB: DrawingBackend>(b: &DrawingArea<DB, plotters::coord
                             if entry.1.bool_parameter_set(&"compress".to_string()) != dataset.bool_parameter_set(&"compress".to_string()) { compress_changed = true; }
                             if entry.1.bool_parameter_set(&"ordered".to_string()) != dataset.bool_parameter_set(&"ordered".to_string()) { ordered_changed = true; }
                             if entry.1.bool_parameter_set(&"uniform".to_string()) != dataset.bool_parameter_set(&"uniform".to_string()) { uniform_changed = true; }
+                            if entry.1.bool_parameter_set(&"readers".to_string()) != dataset.bool_parameter_set(&"readers".to_string()) { readers_changed = true; }
+                            if entry.1.bool_parameter_set(&"progressive".to_string()) != dataset.bool_parameter_set(&"progressive".to_string()) { progressive_changed = true; }
                         },
                         None => {
                             first_dataset = Some(entry.1);
@@ -543,6 +557,12 @@ fn draw_stress_test_data<DB: DrawingBackend>(b: &DrawingArea<DB, plotters::coord
             }
             if !uniform_changed {
                 exclude_parameters.insert("uniform".to_string());
+            }
+            if !readers_changed {
+                exclude_parameters.insert("readers".to_string());
+            }
+            if !progressive_changed {
+                exclude_parameters.insert("progressive".to_string());
             }
 
             let pixel_height = (area.get_pixel_range().1.end - area.get_pixel_range().1.start) as f64;
@@ -586,9 +606,8 @@ fn draw_stress_test_data<DB: DrawingBackend>(b: &DrawingArea<DB, plotters::coord
 
                         let value_data = match chart_type {
                             ChartType::CommitTime => (x, value.commit_time.value_min, value.commit_time.get_range_start(), value.commit_time.get_mean(), value.commit_time.get_range_end(), value.commit_time.value_max),
-                            ChartType::QueryTime => (x, value.query_time.value_min, value.query_time.get_range_start(), value.query_time.get_mean(), value.query_time.get_range_end(), value.query_time.value_max),
-                            ChartType::CommitsPerSecond => (x, x / value.commit_time.value_max, x / value.commit_time.get_range_end(), x / value.commit_time.get_mean(), x /  value.commit_time.get_range_start(), x / value.commit_time.value_min),
-                            ChartType::QueriesPerSecond => (x, (x * COMMIT_SIZE as f64) / value.query_time.value_max, (x * COMMIT_SIZE as f64) / value.query_time.get_range_end(), (x * COMMIT_SIZE as f64) / value.query_time.get_mean(), (x * COMMIT_SIZE as f64) / value.query_time.get_range_start(), (x * COMMIT_SIZE as f64) / value.query_time.value_min),
+                            ChartType::CommitsPerSecond => (x, value.commits_per_second.value_min, value.commits_per_second.get_range_start(), value.commits_per_second.get_mean(), value.commits_per_second.get_range_end(), value.commits_per_second.value_max),
+                            ChartType::QueriesPerSecond => (x, value.queries_per_second.value_min, value.queries_per_second.get_range_start(), value.queries_per_second.get_mean(), value.queries_per_second.get_range_end(), value.queries_per_second.value_max),
                         };
 
                         points.push((value_data.0, value_data.3));
